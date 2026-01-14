@@ -16,7 +16,7 @@ if "auth_ok" not in st.session_state:
 
 if not st.session_state.auth_ok:
     st.title("Revenue Timestamp Tool 🔒")
-    pw = st.text_input("Enter password", type="Urbie")
+    pw = st.text_input("Enter password", type="password")
 
     if st.button("Login"):
         if pw == APP_PASSWORD and pw != "":
