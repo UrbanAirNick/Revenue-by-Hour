@@ -1,3 +1,4 @@
+
 import io
 import zipfile
 from datetime import datetime, timedelta
@@ -120,6 +121,19 @@ def numeric_series(df, column):
         return pd.Series(np.nan, index=df.index, dtype="float64")
 
     return pd.to_numeric(df[column], errors="coerce")
+
+
+def house_account_mask(df):
+    """Identify any park account whose Account Holder contains 'House Account'."""
+    if "Account Holder" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    return (
+        df["Account Holder"]
+        .fillna("")
+        .astype(str)
+        .str.contains(r"house\s+account", case=False, regex=True, na=False)
+    )
 
 
 def validate_columns(df, required, report_name):
@@ -537,6 +551,18 @@ def build_outputs(revenue, drawer, fallback_minutes):
         errors="coerce",
     ).dt.floor("h")
 
+    estimated["Revenue Category"] = np.where(
+        house_account_mask(estimated),
+        "House Account",
+        "Admissions / Other",
+    )
+
+    estimated["Payment Group"] = np.where(
+        estimated["Provider"].fillna("").astype(str).str.lower().str.strip().eq("cash"),
+        "Cash",
+        "Non-Cash",
+    )
+
     hourly = (
         estimated.dropna(subset=["Hour"])
         .groupby("Hour", as_index=False)
@@ -547,6 +573,47 @@ def build_outputs(revenue, drawer, fallback_minutes):
                 "Time Estimate Method",
                 lambda s: int((s == "Exact cash anchor").sum()),
             ),
+        )
+        .sort_values("Hour")
+    )
+
+    category_hourly = (
+        estimated.dropna(subset=["Hour"])
+        .groupby(["Hour", "Revenue Category"], as_index=False)["_revenue_amount"]
+        .sum()
+        .pivot(index="Hour", columns="Revenue Category", values="_revenue_amount")
+        .fillna(0.0)
+        .reset_index()
+        .sort_values("Hour")
+    )
+
+    for required_column in ["Admissions / Other", "House Account"]:
+        if required_column not in category_hourly.columns:
+            category_hourly[required_column] = 0.0
+
+    category_hourly["Total Revenue"] = (
+        category_hourly["Admissions / Other"] + category_hourly["House Account"]
+    )
+
+    payment_mix = (
+        estimated.groupby("Payment Group", as_index=False)
+        .agg(
+            Revenue=("_revenue_amount", "sum"),
+            Transactions=("_revenue_row_id", "count"),
+        )
+        .sort_values("Payment Group")
+    )
+
+    house_account_transactions = estimated[
+        estimated["Revenue Category"].eq("House Account")
+    ].copy()
+
+    house_hourly = (
+        house_account_transactions.dropna(subset=["Hour"])
+        .groupby("Hour", as_index=False)
+        .agg(
+            House_Account_Revenue=("_revenue_amount", "sum"),
+            House_Account_Transactions=("_revenue_row_id", "count"),
         )
         .sort_values("Hour")
     )
@@ -575,7 +642,15 @@ def build_outputs(revenue, drawer, fallback_minutes):
         errors="ignore",
     )
 
-    return revenue_output, match_output, unmatched_output, hourly
+    return (
+        revenue_output,
+        match_output,
+        unmatched_output,
+        hourly,
+        category_hourly,
+        payment_mix,
+        house_hourly,
+    )
 
 
 def dataframe_csv_bytes(df):
@@ -608,6 +683,9 @@ if run_button:
                 match_output,
                 unmatched_output,
                 hourly_output,
+                category_hourly_output,
+                payment_mix_output,
+                house_hourly_output,
             ) = build_outputs(
                 revenue_df,
                 drawer_df,
@@ -647,26 +725,161 @@ if run_button:
         st.divider()
         st.subheader("Revenue by Hour")
 
-        display_hourly = hourly_output.copy()
+        if not category_hourly_output.empty:
+            main_hourly = category_hourly_output.merge(
+                hourly_output[["Hour", "Transactions"]],
+                on="Hour",
+                how="left",
+            ).sort_values("Hour")
 
-        if not display_hourly.empty:
-            display_hourly["Hour"] = pd.to_datetime(
-                display_hourly["Hour"]
+            display_main_hourly = main_hourly.copy()
+            display_main_hourly["Hour"] = pd.to_datetime(
+                display_main_hourly["Hour"]
             ).dt.strftime("%Y-%m-%d %I:00 %p")
 
+            display_main_hourly = display_main_hourly[
+                [
+                    "Hour",
+                    "Admissions / Other",
+                    "House Account",
+                    "Total Revenue",
+                    "Transactions",
+                ]
+            ]
+
             st.dataframe(
-                display_hourly,
+                display_main_hourly,
                 use_container_width=True,
                 hide_index=True,
+                column_config={
+                    "Admissions / Other": st.column_config.NumberColumn(
+                        "Admissions / Other",
+                        format="$%.2f",
+                    ),
+                    "House Account": st.column_config.NumberColumn(
+                        "Cafe + Merch / House Account",
+                        format="$%.2f",
+                    ),
+                    "Total Revenue": st.column_config.NumberColumn(
+                        "Total Revenue",
+                        format="$%.2f",
+                    ),
+                    "Transactions": st.column_config.NumberColumn(
+                        "Transactions",
+                        format="%d",
+                    ),
+                },
             )
 
-            chart_data = hourly_output.set_index("Hour")["Revenue"]
-            st.bar_chart(chart_data)
+            st.caption(
+                "House Account includes cafe, merchandise, arcade cards, and "
+                "other front-desk add-on sales recorded under a park House Account."
+            )
+
+            chart_data = main_hourly.set_index("Hour")[
+                ["Admissions / Other", "House Account"]
+            ]
+            chart_data = chart_data.rename(
+                columns={
+                    "House Account": "Cafe + Merch / House Account",
+                }
+            )
+
+            st.bar_chart(
+                chart_data,
+                stack="normalize" if False else True,
+            )
         else:
             st.warning(
                 "No hourly output could be produced because no transaction "
                 "times were assigned."
             )
+
+        st.divider()
+        st.subheader("Revenue Mix Summary")
+
+        house_mask = revenue_output["Revenue Category"].eq("House Account")
+        house_revenue = pd.to_numeric(
+            revenue_output.loc[house_mask, "Total Price"],
+            errors="coerce",
+        ).fillna(0).sum()
+        house_transactions = int(house_mask.sum())
+        average_house_sale = (
+            house_revenue / house_transactions if house_transactions else 0.0
+        )
+        admissions_revenue = total_revenue - house_revenue
+
+        hc1, hc2, hc3, hc4 = st.columns(4)
+        hc1.metric("Admissions / Other Revenue", f"${admissions_revenue:,.2f}")
+        hc2.metric("House Account Revenue", f"${house_revenue:,.2f}")
+        hc3.metric("House Account Transactions", f"{house_transactions:,}")
+        hc4.metric("Average House Account Sale", f"${average_house_sale:,.2f}")
+
+        st.divider()
+        st.subheader("Cash vs Non-Cash Mix")
+
+        if not payment_mix_output.empty:
+            payment_display = payment_mix_output.copy()
+            total_mix_revenue = payment_display["Revenue"].sum()
+            payment_display["Revenue Share"] = np.where(
+                total_mix_revenue != 0,
+                payment_display["Revenue"] / total_mix_revenue,
+                0.0,
+            )
+            payment_display["Revenue Share"] = payment_display[
+                "Revenue Share"
+            ].map(lambda value: f"{value:.1%}")
+
+            st.dataframe(
+                payment_display,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.divider()
+        st.subheader("House Account Revenue by Hour")
+
+        if not house_hourly_output.empty:
+            house_hourly_display = house_hourly_output.copy()
+            house_hourly_display["Hour"] = pd.to_datetime(
+                house_hourly_display["Hour"]
+            ).dt.strftime("%Y-%m-%d %I:00 %p")
+
+            st.dataframe(
+                house_hourly_display,
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.bar_chart(
+                house_hourly_output.set_index("Hour")["House_Account_Revenue"]
+            )
+        else:
+            st.info("No House Account transactions were found in this report.")
+
+        st.divider()
+        with st.expander("Advanced timing diagnostics"):
+            diagnostics = hourly_output.copy()
+            if not diagnostics.empty:
+                diagnostics["Hour"] = pd.to_datetime(
+                    diagnostics["Hour"]
+                ).dt.strftime("%Y-%m-%d %I:00 %p")
+                st.dataframe(
+                    diagnostics[
+                        ["Hour", "Transactions", "Exact_Anchors"]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Exact_Anchors": st.column_config.NumberColumn(
+                            "Exact Cash Anchors",
+                            format="%d",
+                        ),
+                    },
+                )
+                st.caption(
+                    "Exact cash anchors are retained for validation but are "
+                    "not shown in the main business-facing table."
+                )
 
         st.divider()
         st.subheader("Estimate quality")
@@ -704,6 +917,12 @@ if run_button:
                 dataframe_csv_bytes(revenue_output),
             f"{timestamp}_revenue_by_hour.csv":
                 dataframe_csv_bytes(hourly_output),
+            f"{timestamp}_admissions_vs_house_account_by_hour.csv":
+                dataframe_csv_bytes(category_hourly_output),
+            f"{timestamp}_cash_vs_non_cash_mix.csv":
+                dataframe_csv_bytes(payment_mix_output),
+            f"{timestamp}_house_account_by_hour.csv":
+                dataframe_csv_bytes(house_hourly_output),
         }
 
         st.download_button(
@@ -719,12 +938,8 @@ if run_button:
         with dl1:
             st.download_button(
                 "Matched anchors",
-                files[
-                    f"{timestamp}_cashdrawer_to_revenue_matches.csv"
-                ],
-                file_name=(
-                    f"{timestamp}_cashdrawer_to_revenue_matches.csv"
-                ),
+                files[f"{timestamp}_cashdrawer_to_revenue_matches.csv"],
+                file_name=f"{timestamp}_cashdrawer_to_revenue_matches.csv",
                 mime="text/csv",
             )
 
@@ -739,12 +954,8 @@ if run_button:
         with dl3:
             st.download_button(
                 "Revenue with times",
-                files[
-                    f"{timestamp}_revenue_rollup_with_estimated_times.csv"
-                ],
-                file_name=(
-                    f"{timestamp}_revenue_rollup_with_estimated_times.csv"
-                ),
+                files[f"{timestamp}_revenue_rollup_with_estimated_times.csv"],
+                file_name=f"{timestamp}_revenue_rollup_with_estimated_times.csv",
                 mime="text/csv",
             )
 
@@ -753,6 +964,32 @@ if run_button:
                 "Revenue by hour",
                 files[f"{timestamp}_revenue_by_hour.csv"],
                 file_name=f"{timestamp}_revenue_by_hour.csv",
+                mime="text/csv",
+            )
+
+        dl5, dl6, dl7 = st.columns(3)
+
+        with dl5:
+            st.download_button(
+                "Admissions vs House Account",
+                files[f"{timestamp}_admissions_vs_house_account_by_hour.csv"],
+                file_name=f"{timestamp}_admissions_vs_house_account_by_hour.csv",
+                mime="text/csv",
+            )
+
+        with dl6:
+            st.download_button(
+                "Cash vs Non-Cash",
+                files[f"{timestamp}_cash_vs_non_cash_mix.csv"],
+                file_name=f"{timestamp}_cash_vs_non_cash_mix.csv",
+                mime="text/csv",
+            )
+
+        with dl7:
+            st.download_button(
+                "House Account by Hour",
+                files[f"{timestamp}_house_account_by_hour.csv"],
+                file_name=f"{timestamp}_house_account_by_hour.csv",
                 mime="text/csv",
             )
 
