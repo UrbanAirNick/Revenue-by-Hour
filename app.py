@@ -953,26 +953,6 @@ if run_button:
             )
 
         st.divider()
-        st.subheader("House Account Revenue by Hour")
-
-        if not house_hourly_output.empty:
-            house_hourly_display = house_hourly_output.copy()
-            house_hourly_display["Hour"] = pd.to_datetime(
-                house_hourly_display["Hour"]
-            ).dt.strftime("%Y-%m-%d %I:00 %p")
-
-            st.dataframe(
-                house_hourly_display,
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.bar_chart(
-                house_hourly_output.set_index("Hour")["House_Account_Revenue"]
-            )
-        else:
-            st.info("No House Account transactions were found in this report.")
-
-        st.divider()
         with st.expander("Advanced timing diagnostics"):
             diagnostics = hourly_output.copy()
             if not diagnostics.empty:
