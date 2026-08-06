@@ -554,6 +554,32 @@ def build_outputs(revenue, drawer, fallback_minutes):
 
     house_mask = house_account_mask(estimated)
 
+    transaction_type = (
+        estimated["Transaction Type"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.casefold()
+        if "Transaction Type" in estimated.columns
+        else pd.Series("", index=estimated.index)
+    )
+
+    estimated["Daily Adjustment Type"] = np.select(
+        [
+            transaction_type.eq("recurring"),
+            transaction_type.eq("refund"),
+        ],
+        [
+            "Recurring Membership",
+            "Refund",
+        ],
+        default="Hourly Revenue",
+    )
+
+    recurring_mask = estimated["Daily Adjustment Type"].eq("Recurring Membership")
+    refund_mask = estimated["Daily Adjustment Type"].eq("Refund")
+    hourly_revenue_mask = estimated["Daily Adjustment Type"].eq("Hourly Revenue")
+
     if "Source" in estimated.columns:
         party_mask = (
             estimated["Source"]
@@ -566,13 +592,18 @@ def build_outputs(revenue, drawer, fallback_minutes):
     else:
         party_mask = pd.Series(False, index=estimated.index)
 
-    # Mutually exclusive categories. House Account takes precedence.
+    # Mutually exclusive hourly categories. Recurring and refunds are excluded
+    # because they affect daily totals but do not represent hourly park activity.
     estimated["Revenue Category"] = np.select(
         [
+            recurring_mask,
+            refund_mask,
             house_mask,
             (~house_mask) & party_mask,
         ],
         [
+            "Recurring Membership",
+            "Refund",
             "House Account",
             "Parties / Events",
         ],
@@ -585,8 +616,12 @@ def build_outputs(revenue, drawer, fallback_minutes):
         "Non-Cash",
     )
 
+    hourly_source = estimated[
+        hourly_revenue_mask & estimated["Hour"].notna()
+    ].copy()
+
     hourly = (
-        estimated.dropna(subset=["Hour"])
+        hourly_source
         .groupby("Hour", as_index=False)
         .agg(
             Revenue=("_revenue_amount", "sum"),
@@ -600,7 +635,7 @@ def build_outputs(revenue, drawer, fallback_minutes):
     )
 
     category_hourly = (
-        estimated.dropna(subset=["Hour"])
+        hourly_source
         .groupby(["Hour", "Revenue Category"], as_index=False)["_revenue_amount"]
         .sum()
         .pivot(index="Hour", columns="Revenue Category", values="_revenue_amount")
@@ -670,6 +705,20 @@ def build_outputs(revenue, drawer, fallback_minutes):
         errors="ignore",
     )
 
+    recurring_summary = {
+        "transactions": int(recurring_mask.sum()),
+        "revenue": float(
+            estimated.loc[recurring_mask, "_revenue_amount"].sum()
+        ),
+    }
+
+    refund_summary = {
+        "transactions": int(refund_mask.sum()),
+        "revenue": float(
+            estimated.loc[refund_mask, "_revenue_amount"].sum()
+        ),
+    }
+
     return (
         revenue_output,
         match_output,
@@ -678,6 +727,8 @@ def build_outputs(revenue, drawer, fallback_minutes):
         category_hourly,
         payment_mix,
         house_hourly,
+        recurring_summary,
+        refund_summary,
     )
 
 
@@ -714,6 +765,8 @@ if run_button:
                 category_hourly_output,
                 payment_mix_output,
                 house_hourly_output,
+                recurring_summary,
+                refund_summary,
             ) = build_outputs(
                 revenue_df,
                 drawer_df,
@@ -746,7 +799,7 @@ if run_button:
             f"{assigned_times:,}",
         )
         col4.metric(
-            "Total revenue",
+            "Total Daily Revenue",
             f"${total_revenue:,.2f}",
         )
 
@@ -892,7 +945,8 @@ if run_button:
             st.caption(
                 "House Account includes cafe, merchandise, arcade cards, and "
                 "other front-desk add-on sales. Parties / Events includes all "
-                "transactions whose Source is Admin Booking."
+                "transactions whose Source is Admin Booking. Recurring membership "
+                "charges and refunds are excluded from this hourly chart."
             )
         else:
             st.warning(
@@ -930,6 +984,32 @@ if run_button:
         hc2.metric("Party / Event Revenue", f"${party_revenue:,.2f}")
         hc3.metric("House Account Revenue", f"${house_revenue:,.2f}")
         hc4.metric("Average House Account Sale", f"${average_house_sale:,.2f}")
+
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        rc1.metric(
+            "Recurring Membership Revenue",
+            f"${recurring_summary['revenue']:,.2f}",
+        )
+        rc2.metric(
+            "Recurring Transactions",
+            f"{recurring_summary['transactions']:,}",
+        )
+        rc3.metric(
+            "Refund Total",
+            f"${refund_summary['revenue']:,.2f}",
+        )
+        rc4.metric(
+            "Number of Refunds",
+            f"{refund_summary['transactions']:,}",
+        )
+
+        st.caption(
+            "Recurring transactions represent membership charges processed that day. "
+            "The count may represent individual memberships or accounts with multiple "
+            "memberships because of reporting behavior. Recurring transactions and "
+            "refunds are included in daily totals but excluded from the hourly revenue "
+            "table and chart."
+        )
 
         st.divider()
         st.subheader("Cash vs Non-Cash Mix")
