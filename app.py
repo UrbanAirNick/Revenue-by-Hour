@@ -829,13 +829,10 @@ if run_button:
                 ]
             ]
 
-            table_event = st.dataframe(
+            st.dataframe(
                 display_main_hourly,
                 use_container_width=True,
                 hide_index=True,
-                on_select="rerun",
-                selection_mode="multi-row",
-                key="revenue_by_hour_table",
                 column_config={
                     "Total Revenue": st.column_config.NumberColumn(
                         "Total Revenue",
@@ -859,47 +856,6 @@ if run_button:
                     ),
                 },
             )
-
-            selected_rows = table_event.selection.rows
-
-            if selected_rows:
-                selected_hourly = display_main_hourly.iloc[selected_rows]
-
-                st.markdown("#### Selected-row totals")
-
-                sel1, sel2, sel3, sel4, sel5 = st.columns(5)
-
-                sel1.metric(
-                    "Total Revenue",
-                    f"${selected_hourly['Total Revenue'].sum():,.2f}",
-                )
-                sel2.metric(
-                    "House Account",
-                    f"${selected_hourly['House Account'].sum():,.2f}",
-                )
-                sel3.metric(
-                    "Parties / Events",
-                    f"${selected_hourly['Parties / Events'].sum():,.2f}",
-                )
-                sel4.metric(
-                    "Admission Tickets",
-                    f"${selected_hourly['Admission Tickets'].sum():,.2f}",
-                )
-                sel5.metric(
-                    "Transactions",
-                    f"{int(selected_hourly['Transactions'].sum()):,}",
-                )
-
-                st.caption(
-                    f"{len(selected_rows)} hourly row(s) selected. "
-                    "Click a selected row again, or click an empty area in the table, "
-                    "to adjust the selection."
-                )
-            else:
-                st.caption(
-                    "Select one or more rows in the table to see combined totals "
-                    "for those hours."
-                )
 
             chart_long = main_hourly[
                 [
