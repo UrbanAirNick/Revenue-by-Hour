@@ -1,5 +1,4 @@
 
-
 import io
 import zipfile
 from datetime import datetime, timedelta
@@ -819,17 +818,26 @@ if run_button:
                 value_name="Revenue",
             )
 
-            chart_long["Hour Label"] = pd.to_datetime(
-                chart_long["Hour"]
-            ).dt.strftime("%-I %p")
+            # Create explicit categorical hour labels and order. This avoids
+            # browser/Altair time-axis behavior that can insert 15-minute ticks.
+            chart_long["Hour"] = pd.to_datetime(chart_long["Hour"])
+            chart_long["Hour Label"] = chart_long["Hour"].dt.strftime("%I %p").str.lstrip("0")
+            hour_order = (
+                chart_long[["Hour", "Hour Label"]]
+                .drop_duplicates()
+                .sort_values("Hour")["Hour Label"]
+                .tolist()
+            )
+
+            revenue_type_order = [
+                "Total Revenue",
+                "House Account",
+                "Parties / Events",
+                "Admission Tickets",
+            ]
 
             color_scale = alt.Scale(
-                domain=[
-                    "Total Revenue",
-                    "House Account",
-                    "Parties / Events",
-                    "Admission Tickets",
-                ],
+                domain=revenue_type_order,
                 range=[
                     "#000005",
                     "#88dbdf",
@@ -845,30 +853,26 @@ if run_button:
                     x=alt.X(
                         "Hour Label:N",
                         title=None,
-                        sort=alt.SortField(field="Hour", order="ascending"),
+                        sort=hour_order,
                         axis=alt.Axis(
                             labelAngle=0,
                             labelOverlap=False,
-                            tickCount="hour",
                         ),
                     ),
                     xOffset=alt.XOffset(
                         "Revenue Type:N",
-                        sort=[
-                            "Total Revenue",
-                            "House Account",
-                            "Parties / Events",
-                            "Admission Tickets",
-                        ],
+                        sort=revenue_type_order,
                     ),
                     y=alt.Y(
                         "Revenue:Q",
                         title="Revenue",
+                        scale=alt.Scale(zero=True),
                         axis=alt.Axis(format="$,.0f"),
                     ),
                     color=alt.Color(
                         "Revenue Type:N",
                         scale=color_scale,
+                        sort=revenue_type_order,
                         legend=alt.Legend(
                             title=None,
                             orient="bottom",
