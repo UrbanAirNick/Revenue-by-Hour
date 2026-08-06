@@ -1,8 +1,10 @@
 
+
 import io
 import zipfile
 from datetime import datetime, timedelta
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -551,10 +553,31 @@ def build_outputs(revenue, drawer, fallback_minutes):
         errors="coerce",
     ).dt.floor("h")
 
-    estimated["Revenue Category"] = np.where(
-        house_account_mask(estimated),
-        "House Account",
-        "Admissions / Other",
+    house_mask = house_account_mask(estimated)
+
+    if "Source" in estimated.columns:
+        party_mask = (
+            estimated["Source"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.casefold()
+            .eq("admin booking")
+        )
+    else:
+        party_mask = pd.Series(False, index=estimated.index)
+
+    # Mutually exclusive categories. House Account takes precedence.
+    estimated["Revenue Category"] = np.select(
+        [
+            house_mask,
+            (~house_mask) & party_mask,
+        ],
+        [
+            "House Account",
+            "Parties / Events",
+        ],
+        default="Admission Tickets",
     )
 
     estimated["Payment Group"] = np.where(
@@ -587,12 +610,18 @@ def build_outputs(revenue, drawer, fallback_minutes):
         .sort_values("Hour")
     )
 
-    for required_column in ["Admissions / Other", "House Account"]:
+    for required_column in [
+        "Admission Tickets",
+        "House Account",
+        "Parties / Events",
+    ]:
         if required_column not in category_hourly.columns:
             category_hourly[required_column] = 0.0
 
     category_hourly["Total Revenue"] = (
-        category_hourly["Admissions / Other"] + category_hourly["House Account"]
+        category_hourly["Admission Tickets"]
+        + category_hourly["House Account"]
+        + category_hourly["Parties / Events"]
     )
 
     payment_mix = (
@@ -740,9 +769,10 @@ if run_button:
             display_main_hourly = display_main_hourly[
                 [
                     "Hour",
-                    "Admissions / Other",
-                    "House Account",
                     "Total Revenue",
+                    "House Account",
+                    "Parties / Events",
+                    "Admission Tickets",
                     "Transactions",
                 ]
             ]
@@ -752,16 +782,20 @@ if run_button:
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Admissions / Other": st.column_config.NumberColumn(
-                        "Admissions / Other",
+                    "Total Revenue": st.column_config.NumberColumn(
+                        "Total Revenue",
                         format="$%.2f",
                     ),
                     "House Account": st.column_config.NumberColumn(
                         "Cafe + Merch / House Account",
                         format="$%.2f",
                     ),
-                    "Total Revenue": st.column_config.NumberColumn(
-                        "Total Revenue",
+                    "Parties / Events": st.column_config.NumberColumn(
+                        "Parties / Events",
+                        format="$%.2f",
+                    ),
+                    "Admission Tickets": st.column_config.NumberColumn(
+                        "Admission Tickets",
                         format="$%.2f",
                     ),
                     "Transactions": st.column_config.NumberColumn(
@@ -771,23 +805,90 @@ if run_button:
                 },
             )
 
+            chart_long = main_hourly[
+                [
+                    "Hour",
+                    "Total Revenue",
+                    "House Account",
+                    "Parties / Events",
+                    "Admission Tickets",
+                ]
+            ].melt(
+                id_vars="Hour",
+                var_name="Revenue Type",
+                value_name="Revenue",
+            )
+
+            chart_long["Hour Label"] = pd.to_datetime(
+                chart_long["Hour"]
+            ).dt.strftime("%-I %p")
+
+            color_scale = alt.Scale(
+                domain=[
+                    "Total Revenue",
+                    "House Account",
+                    "Parties / Events",
+                    "Admission Tickets",
+                ],
+                range=[
+                    "#000005",
+                    "#88dbdf",
+                    "#e0e621",
+                    "#5d328c",
+                ],
+            )
+
+            chart = (
+                alt.Chart(chart_long)
+                .mark_bar()
+                .encode(
+                    x=alt.X(
+                        "Hour Label:N",
+                        title=None,
+                        sort=alt.SortField(field="Hour", order="ascending"),
+                        axis=alt.Axis(
+                            labelAngle=0,
+                            labelOverlap=False,
+                            tickCount="hour",
+                        ),
+                    ),
+                    xOffset=alt.XOffset(
+                        "Revenue Type:N",
+                        sort=[
+                            "Total Revenue",
+                            "House Account",
+                            "Parties / Events",
+                            "Admission Tickets",
+                        ],
+                    ),
+                    y=alt.Y(
+                        "Revenue:Q",
+                        title="Revenue",
+                        axis=alt.Axis(format="$,.0f"),
+                    ),
+                    color=alt.Color(
+                        "Revenue Type:N",
+                        scale=color_scale,
+                        legend=alt.Legend(
+                            title=None,
+                            orient="bottom",
+                        ),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Hour Label:N", title="Hour"),
+                        alt.Tooltip("Revenue Type:N", title="Category"),
+                        alt.Tooltip("Revenue:Q", title="Revenue", format="$,.2f"),
+                    ],
+                )
+                .properties(height=420)
+            )
+
+            st.altair_chart(chart, use_container_width=True)
+
             st.caption(
                 "House Account includes cafe, merchandise, arcade cards, and "
-                "other front-desk add-on sales recorded under a park House Account."
-            )
-
-            chart_data = main_hourly.set_index("Hour")[
-                ["Admissions / Other", "House Account"]
-            ]
-            chart_data = chart_data.rename(
-                columns={
-                    "House Account": "Cafe + Merch / House Account",
-                }
-            )
-
-            st.bar_chart(
-                chart_data,
-                stack="normalize" if False else True,
+                "other front-desk add-on sales. Parties / Events includes all "
+                "transactions whose Source is Admin Booking."
             )
         else:
             st.warning(
@@ -799,20 +900,31 @@ if run_button:
         st.subheader("Revenue Mix Summary")
 
         house_mask = revenue_output["Revenue Category"].eq("House Account")
+        party_mask = revenue_output["Revenue Category"].eq("Parties / Events")
+        admission_mask = revenue_output["Revenue Category"].eq("Admission Tickets")
+
         house_revenue = pd.to_numeric(
             revenue_output.loc[house_mask, "Total Price"],
             errors="coerce",
         ).fillna(0).sum()
+        party_revenue = pd.to_numeric(
+            revenue_output.loc[party_mask, "Total Price"],
+            errors="coerce",
+        ).fillna(0).sum()
+        admission_revenue = pd.to_numeric(
+            revenue_output.loc[admission_mask, "Total Price"],
+            errors="coerce",
+        ).fillna(0).sum()
+
         house_transactions = int(house_mask.sum())
         average_house_sale = (
             house_revenue / house_transactions if house_transactions else 0.0
         )
-        admissions_revenue = total_revenue - house_revenue
 
         hc1, hc2, hc3, hc4 = st.columns(4)
-        hc1.metric("Admissions / Other Revenue", f"${admissions_revenue:,.2f}")
-        hc2.metric("House Account Revenue", f"${house_revenue:,.2f}")
-        hc3.metric("House Account Transactions", f"{house_transactions:,}")
+        hc1.metric("Admission Ticket Revenue", f"${admission_revenue:,.2f}")
+        hc2.metric("Party / Event Revenue", f"${party_revenue:,.2f}")
+        hc3.metric("House Account Revenue", f"${house_revenue:,.2f}")
         hc4.metric("Average House Account Sale", f"${average_house_sale:,.2f}")
 
         st.divider()
@@ -917,7 +1029,7 @@ if run_button:
                 dataframe_csv_bytes(revenue_output),
             f"{timestamp}_revenue_by_hour.csv":
                 dataframe_csv_bytes(hourly_output),
-            f"{timestamp}_admissions_vs_house_account_by_hour.csv":
+            f"{timestamp}_revenue_categories_by_hour.csv":
                 dataframe_csv_bytes(category_hourly_output),
             f"{timestamp}_cash_vs_non_cash_mix.csv":
                 dataframe_csv_bytes(payment_mix_output),
@@ -971,9 +1083,9 @@ if run_button:
 
         with dl5:
             st.download_button(
-                "Admissions vs House Account",
-                files[f"{timestamp}_admissions_vs_house_account_by_hour.csv"],
-                file_name=f"{timestamp}_admissions_vs_house_account_by_hour.csv",
+                "Revenue Categories by Hour",
+                files[f"{timestamp}_revenue_categories_by_hour.csv"],
+                file_name=f"{timestamp}_revenue_categories_by_hour.csv",
                 mime="text/csv",
             )
 
